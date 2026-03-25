@@ -1,25 +1,21 @@
 # coding=utf-8
 import argparse
 import json
-import math
 from pathlib import Path
 
 import torch
 
 from qwen_tts import Qwen3TTSModel
+from qwen_tts.eval_utils import (
+    build_custom_voice_decode_kwargs,
+    compute_length_cap,
+    summarize_audio_array,
+)
 
 
 def _read_jsonl(path: Path):
     with path.open("r", encoding="utf-8") as f:
         return [json.loads(line) for line in f]
-
-
-def _fixed_eval_cap(row: dict, args) -> int:
-    if args.fixed_eval_length_mode == "dynamic" and "target_code_frames" in row:
-        dynamic_cap = math.ceil(float(row["target_code_frames"]) * float(args.fixed_eval_length_multiplier))
-        return int(max(2, min(args.fixed_eval_max_new_tokens, dynamic_cap)))
-    return int(args.fixed_eval_max_new_tokens)
-
 
 def _resolve_eval_rows(experiment_dir: Path, eval_jsonl: str | None):
     if eval_jsonl:
@@ -49,10 +45,10 @@ def _resolve_checkpoint_dirs(experiment_dir: Path, checkpoint_names):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--experiment_dir", type=str, default="finetuning/exp/output_bznsyp_1p7b_sft")
+    parser.add_argument("--experiment_dir", type=str, default="finetuning/exp/output_bznsyp_1p7b_sft-3.21")
     parser.add_argument("--checkpoint_names", nargs="*", default=["checkpoint-epoch-0", "checkpoint-epoch-1"])
     parser.add_argument("--eval_jsonl", type=str, default=None)
-    parser.add_argument("--output_dir", type=str, default=None)
+    parser.add_argument("--output_dir", type=str, default="finetuning/exp/output_bznsyp_1p7b_sft-3.21/listening_tests_3-25")
     parser.add_argument("--speaker", type=str, default="bznsyp_female")
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--attn_implementation", type=str, default="flash_attention_2")
@@ -87,18 +83,30 @@ def main():
         manifest = []
         for idx, row in enumerate(eval_rows):
             sample_id = row.get("sample_id", f"{idx:02d}")
-            max_new_tokens = _fixed_eval_cap(row, args)
+            max_new_tokens = compute_length_cap(
+                row,
+                length_mode=args.fixed_eval_length_mode,
+                length_multiplier=args.fixed_eval_length_multiplier,
+                fixed_max_new_tokens=args.fixed_eval_max_new_tokens,
+            )
+            decode_kwargs = build_custom_voice_decode_kwargs(
+                max_new_tokens=max_new_tokens,
+                do_sample=args.fixed_eval_do_sample,
+            )
             wavs, sample_rate = tts.generate_custom_voice(
                 text=row["text"],
                 language=row.get("language", args.fixed_eval_language),
                 speaker=row.get("speaker", args.speaker),
                 instruct=row.get("instruct", ""),
-                do_sample=args.fixed_eval_do_sample,
-                subtalker_dosample=args.fixed_eval_do_sample,
-                max_new_tokens=max_new_tokens,
+                **decode_kwargs,
             )
             wav_path = checkpoint_output_dir / f"{sample_id}.wav"
             sf.write(wav_path, wavs[0], sample_rate)
+            audio_metrics = summarize_audio_array(wavs[0], sample_rate)
+            target_seconds = row.get("target_seconds")
+            duration_ratio = None
+            if target_seconds is not None and float(target_seconds) > 0:
+                duration_ratio = round(float(audio_metrics["decoded_seconds"]) / float(target_seconds), 6)
             manifest.append(
                 {
                     "index": idx,
@@ -110,6 +118,11 @@ def main():
                     "wav_path": str(wav_path),
                     "sample_rate": sample_rate,
                     "max_new_tokens": max_new_tokens,
+                    "decoded_seconds": audio_metrics["decoded_seconds"],
+                    "peak": audio_metrics["peak"],
+                    "clipped_frac": audio_metrics["clipped_frac"],
+                    "target_seconds": target_seconds,
+                    "duration_ratio": duration_ratio,
                 }
             )
 
@@ -119,6 +132,13 @@ def main():
                     "experiment_dir": str(experiment_dir),
                     "checkpoint_dir": str(checkpoint_dir),
                     "eval_jsonl": str(eval_path),
+                    "decode_policy": {
+                        "do_sample": bool(args.fixed_eval_do_sample),
+                        "subtalker_dosample": bool(args.fixed_eval_do_sample),
+                        "fixed_eval_length_mode": args.fixed_eval_length_mode,
+                        "fixed_eval_length_multiplier": args.fixed_eval_length_multiplier,
+                        "fixed_eval_max_new_tokens": args.fixed_eval_max_new_tokens,
+                    },
                     "samples": manifest,
                 },
                 f,

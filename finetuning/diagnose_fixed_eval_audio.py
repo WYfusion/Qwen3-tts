@@ -9,6 +9,8 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
+from qwen_tts.eval_utils import summarize_audio_path
+
 
 def read_json(path: Path):
     with path.open("r", encoding="utf-8") as f:
@@ -21,12 +23,9 @@ def read_jsonl(path: Path):
 
 
 def audio_info(path: Path):
-    info = sf.info(str(path))
-    return {
-        "frames": int(info.frames),
-        "sample_rate": int(info.samplerate),
-        "seconds": float(info.frames) / float(info.samplerate),
-    }
+    metrics = summarize_audio_path(path)
+    metrics["seconds"] = float(metrics["decoded_seconds"])
+    return metrics
 
 
 def trailing_low_energy_seconds(path: Path, frame_seconds: float = 0.05, threshold_db: float = -35.0) -> float:
@@ -110,6 +109,9 @@ def main():
     parser.add_argument("--raw_audio_root", type=str, default="assets/BZNSYP/Wave")
     parser.add_argument("--output_json", type=str, default=None)
     parser.add_argument("--output_csv", type=str, default=None)
+    parser.add_argument("--duration_ratio_anomaly_threshold", type=float, default=1.5)
+    parser.add_argument("--peak_warn_threshold", type=float, default=0.99)
+    parser.add_argument("--clipped_frac_warn_threshold", type=float, default=1e-6)
     args = parser.parse_args()
 
     fixed_eval_dir = Path(args.fixed_eval_dir)
@@ -152,7 +154,13 @@ def main():
         duration_ratio = generated_info["seconds"] / max(target_info["seconds"], 1e-6)
         trailing_seconds = trailing_low_energy_seconds(generated_path)
         cap_hit = bool(row.get("cap_hit", False))
-        inferred_anomaly = cap_hit or duration_ratio > 2.5 or generated_info["seconds"] <= 0.0
+        inferred_anomaly = (
+            cap_hit
+            or duration_ratio > args.duration_ratio_anomaly_threshold
+            or generated_info["seconds"] <= 0.0
+            or float(generated_info["peak"]) >= args.peak_warn_threshold
+            or float(generated_info["clipped_frac"]) > args.clipped_frac_warn_threshold
+        )
         report_rows.append(
             {
                 "sample_id": sample_id,
@@ -160,10 +168,13 @@ def main():
                 "target_audio": str(target_audio),
                 "generated_audio": str(generated_path),
                 "target_seconds": round(target_info["seconds"], 6),
+                "decoded_seconds": round(generated_info["seconds"], 6),
                 "generated_seconds": round(generated_info["seconds"], 6),
                 "duration_ratio": round(duration_ratio, 6),
                 "duration_abs_error": round(abs(generated_info["seconds"] - target_info["seconds"]), 6),
                 "generated_tail_low_energy_seconds": trailing_seconds,
+                "generated_peak": generated_info["peak"],
+                "generated_clipped_frac": generated_info["clipped_frac"],
                 "cap_hit": cap_hit,
                 "stop_reason": row.get("stop_reason", ""),
                 "is_anomaly": bool(row.get("is_anomaly", False)) or inferred_anomaly,
@@ -186,6 +197,11 @@ def main():
         "max_tail_low_energy_seconds": max(
             (row["generated_tail_low_energy_seconds"] for row in report_rows), default=0.0
         ),
+        "max_generated_peak": max((row["generated_peak"] for row in report_rows), default=0.0),
+        "max_generated_clipped_frac": max((row["generated_clipped_frac"] for row in report_rows), default=0.0),
+        "duration_ratio_anomaly_threshold": args.duration_ratio_anomaly_threshold,
+        "peak_warn_threshold": args.peak_warn_threshold,
+        "clipped_frac_warn_threshold": args.clipped_frac_warn_threshold,
         "samples": report_rows,
     }
 
