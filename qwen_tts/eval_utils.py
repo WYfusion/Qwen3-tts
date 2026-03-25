@@ -52,21 +52,114 @@ def _to_mono_float32(wav: np.ndarray) -> np.ndarray:
     return arr
 
 
+def trailing_low_energy_seconds_from_array(
+    wav: np.ndarray,
+    sample_rate: int,
+    *,
+    frame_seconds: float = 0.05,
+    threshold_db: float = -35.0,
+) -> float:
+    arr = _to_mono_float32(wav)
+    if arr.size == 0 or sample_rate <= 0:
+        return 0.0
+    hop = max(1, int(sample_rate * frame_seconds))
+    frame_rms = []
+    for start in range(0, len(arr), hop):
+        chunk = arr[start : start + hop]
+        if chunk.size == 0:
+            continue
+        frame_rms.append(float(np.sqrt(np.mean(np.square(chunk))) + 1e-12))
+    if not frame_rms:
+        return 0.0
+    peak_rms = max(frame_rms)
+    cutoff = peak_rms * (10.0 ** (threshold_db / 20.0))
+    trailing = 0
+    for rms in reversed(frame_rms):
+        if rms <= cutoff:
+            trailing += 1
+        else:
+            break
+    return round(trailing * frame_seconds, 6)
+
+
+def hf_noise_ratio_from_array(
+    wav: np.ndarray,
+    sample_rate: int,
+    *,
+    cutoff_hz: float = 6000.0,
+) -> float:
+    arr = _to_mono_float32(wav)
+    if arr.size == 0 or sample_rate <= 0:
+        return 0.0
+    spectrum = np.fft.rfft(arr)
+    power = np.abs(spectrum) ** 2
+    total_power = float(np.sum(power))
+    if total_power <= 1e-12:
+        return 0.0
+    freqs = np.fft.rfftfreq(arr.shape[0], d=1.0 / float(sample_rate))
+    hf_power = float(np.sum(power[freqs >= cutoff_hz]))
+    return round(hf_power / total_power, 6)
+
+
+def voiced_f0_delta_p95_from_array(
+    wav: np.ndarray,
+    sample_rate: int,
+    *,
+    fmin: float = 60.0,
+    fmax: float = 500.0,
+) -> float:
+    arr = _to_mono_float32(wav)
+    if arr.size < max(32, sample_rate // 8) or sample_rate <= 0:
+        return 0.0
+    try:
+        import librosa
+    except ModuleNotFoundError:
+        return 0.0
+
+    frame_length = min(2048, int(2 ** np.floor(np.log2(max(256, arr.size)))))
+    hop_length = max(128, sample_rate // 100)
+    try:
+        f0 = librosa.yin(
+            arr,
+            fmin=fmin,
+            fmax=fmax,
+            sr=sample_rate,
+            frame_length=frame_length,
+            hop_length=hop_length,
+        )
+    except Exception:
+        return 0.0
+    f0 = np.asarray(f0, dtype=np.float32)
+    voiced = f0[np.isfinite(f0) & (f0 > 0)]
+    if voiced.size < 3:
+        return 0.0
+    cents = np.abs(np.diff(np.log2(voiced))) * 1200.0
+    if cents.size == 0:
+        return 0.0
+    return round(float(np.percentile(cents, 95.0)), 6)
+
+
 def summarize_audio_array(wav: np.ndarray, sample_rate: int, *, clip_threshold: float = 0.999) -> dict[str, float | int]:
     arr = _to_mono_float32(wav)
     frames = int(arr.shape[0])
     if frames == 0:
         peak = 0.0
         clipped_frac = 0.0
+        rms = 0.0
     else:
         peak = float(np.max(np.abs(arr)))
         clipped_frac = float(np.mean(np.abs(arr) >= clip_threshold))
+        rms = float(np.sqrt(np.mean(np.square(arr))) + 1e-12)
     return {
         "frames": frames,
         "sample_rate": int(sample_rate),
         "decoded_seconds": round(frames / float(sample_rate), 6) if sample_rate else 0.0,
         "peak": round(peak, 6),
         "clipped_frac": round(clipped_frac, 6),
+        "rms": round(rms, 6),
+        "tail_low_energy_seconds": trailing_low_energy_seconds_from_array(arr, sample_rate),
+        "hf_noise_ratio": hf_noise_ratio_from_array(arr, sample_rate),
+        "voiced_f0_delta_p95": voiced_f0_delta_p95_from_array(arr, sample_rate),
     }
 
 
