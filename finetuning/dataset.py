@@ -121,12 +121,12 @@ class TTSDataset(Dataset):
         item = self.data_list[idx]
 
         audio_path  = item["audio"]
-        text        = item["text"]
+        raw_text    = item["text"]
         audio_codes = item["audio_codes"]
         language        = item.get('language','Auto')
         ref_audio_path  = item['ref_audio']
 
-        text = self._build_assistant_text(text)
+        text = self._build_assistant_text(raw_text)
         text_ids = self._tokenize_texts(text)
 
         audio_codes = torch.tensor(audio_codes, dtype=torch.long)
@@ -144,7 +144,7 @@ class TTSDataset(Dataset):
             "sample_meta": {
                 "index": idx,
                 "audio": audio_path,
-                "text": text,
+                "text": raw_text,
                 "ref_audio": ref_audio_path,
                 "language": language,
             },

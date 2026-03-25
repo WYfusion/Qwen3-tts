@@ -25,7 +25,7 @@ env/
 .github
 uv.lock
 Qwen3*
-examples/wav
+examples/wav*
 assets
 wandb
 finetuning/exp*

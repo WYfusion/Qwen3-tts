@@ -80,6 +80,11 @@ def main():
             ("epoch_main_loss", "epoch_main_loss.png"),
             ("epoch_sub_loss", "epoch_sub_loss.png"),
             ("epoch_tokens_per_sec", "epoch_tokens_per_sec.png"),
+            ("fixed_eval_mean_duration_ratio", "fixed_eval_mean_duration_ratio.png"),
+            ("fixed_eval_max_duration_ratio", "fixed_eval_max_duration_ratio.png"),
+            ("fixed_eval_mean_abs_duration_error", "fixed_eval_mean_abs_duration_error.png"),
+            ("fixed_eval_cap_hit_rate", "fixed_eval_cap_hit_rate.png"),
+            ("fixed_eval_qc_score", "fixed_eval_qc_score.png"),
         ]:
             ys = [float(r[key]) for r in rows if key in r and r[key] != ""]
             if len(ys) == len(epochs):

@@ -1,6 +1,7 @@
 # coding=utf-8
 import argparse
 import json
+import math
 from pathlib import Path
 
 import torch
@@ -13,17 +14,11 @@ def _read_jsonl(path: Path):
         return [json.loads(line) for line in f]
 
 
-def _sanitize_filename(name: str, max_len: int = 48) -> str:
-    cleaned = []
-    for ch in name.strip():
-        if ch.isalnum():
-            cleaned.append(ch)
-        elif ch in {"-", "_"}:
-            cleaned.append(ch)
-        elif ch.isspace():
-            cleaned.append("_")
-    value = "".join(cleaned).strip("_")
-    return value[:max_len] if value else "sample"
+def _fixed_eval_cap(row: dict, args) -> int:
+    if args.fixed_eval_length_mode == "dynamic" and "target_code_frames" in row:
+        dynamic_cap = math.ceil(float(row["target_code_frames"]) * float(args.fixed_eval_length_multiplier))
+        return int(max(2, min(args.fixed_eval_max_new_tokens, dynamic_cap)))
+    return int(args.fixed_eval_max_new_tokens)
 
 
 def _resolve_eval_rows(experiment_dir: Path, eval_jsonl: str | None):
@@ -61,6 +56,11 @@ def main():
     parser.add_argument("--speaker", type=str, default="bznsyp_female")
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--attn_implementation", type=str, default="flash_attention_2")
+    parser.add_argument("--fixed_eval_length_mode", type=str, choices=["dynamic", "fixed"], default="dynamic")
+    parser.add_argument("--fixed_eval_length_multiplier", type=float, default=2.0)
+    parser.add_argument("--fixed_eval_max_new_tokens", type=int, default=256)
+    parser.add_argument("--fixed_eval_do_sample", action="store_true")
+    parser.add_argument("--fixed_eval_language", type=str, default="Chinese")
     args = parser.parse_args()
 
     experiment_dir = Path(args.experiment_dir)
@@ -86,24 +86,30 @@ def main():
 
         manifest = []
         for idx, row in enumerate(eval_rows):
+            sample_id = row.get("sample_id", f"{idx:02d}")
+            max_new_tokens = _fixed_eval_cap(row, args)
             wavs, sample_rate = tts.generate_custom_voice(
                 text=row["text"],
-                language=row.get("language", "Auto"),
+                language=row.get("language", args.fixed_eval_language),
                 speaker=row.get("speaker", args.speaker),
                 instruct=row.get("instruct", ""),
+                do_sample=args.fixed_eval_do_sample,
+                subtalker_dosample=args.fixed_eval_do_sample,
+                max_new_tokens=max_new_tokens,
             )
-            stem = _sanitize_filename(row["text"])
-            wav_path = checkpoint_output_dir / f"{idx:02d}_{stem}.wav"
+            wav_path = checkpoint_output_dir / f"{sample_id}.wav"
             sf.write(wav_path, wavs[0], sample_rate)
             manifest.append(
                 {
                     "index": idx,
+                    "sample_id": sample_id,
                     "text": row["text"],
-                    "language": row.get("language", "Auto"),
+                    "language": row.get("language", args.fixed_eval_language),
                     "instruct": row.get("instruct", ""),
                     "speaker": row.get("speaker", args.speaker),
                     "wav_path": str(wav_path),
                     "sample_rate": sample_rate,
+                    "max_new_tokens": max_new_tokens,
                 }
             )
 
