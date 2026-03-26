@@ -19,11 +19,12 @@ license = { text = "Apache-2.0" }
 authors = [{ name = "Alibaba Qwen Team" }]
 
 dependencies = [
+  "torch==2.10.0",
   "transformers==4.57.3",
   "accelerate==1.12.0",
   "gradio",
   "librosa",
-  "torchaudio",
+  "torchaudio==2.10.0",
   "soundfile",
   "sox",
   "onnxruntime",
@@ -43,6 +44,18 @@ Repository = "https://github.com/Qwen/Qwen3-TTS"
 
 [project.scripts]
 qwen-tts-demo = "qwen_tts.cli.demo:main"
+
+[dependency-groups]
+train = [
+  "tensorboard>=2.20.0",
+  "packaging>=24.2",
+  "ninja>=1.11.1",
+  "flash-attn==2.8.3; platform_system == 'Linux' and platform_machine == 'x86_64'",
+]
+
+[tool.uv]
+default-groups = ["train"]
+extra-build-dependencies = { flash-attn = [{ requirement = "torch", match-runtime = true }, "packaging", "ninja"] }
 
 [tool.setuptools]
 packages = { find = { where = ["."] , include = ["qwen_tts*"] } }

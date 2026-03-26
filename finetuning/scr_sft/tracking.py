@@ -46,6 +46,18 @@ def get_wandb_run(accelerator):
         return None
 
 
+def _to_tracker_scalar(value):
+    if value is None:
+        return ""
+    if isinstance(value, (bool, int, float, str)):
+        return value
+    return str(value)
+
+
+def sanitize_tracker_config(config: dict) -> dict:
+    return {str(key): _to_tracker_scalar(value) for key, value in config.items()}
+
+
 def init_trackers(accelerator, *, logging_config, tracker_config: dict, wandb_run_id: str, wandb_run_name: str, wandb_group: str):
     init_kwargs = {}
     if wandb_enabled(parse_log_with(logging_config.log_with_raw)):
@@ -61,6 +73,7 @@ def init_trackers(accelerator, *, logging_config, tracker_config: dict, wandb_ru
             wandb_kwargs["entity"] = logging_config.wandb_entity
         init_kwargs["wandb"] = wandb_kwargs
         wandb_run_id = wandb_kwargs["id"]
+    tracker_config = sanitize_tracker_config(tracker_config)
     accelerator.init_trackers(
         project_name=logging_config.wandb_project,
         config=tracker_config,
@@ -71,4 +84,3 @@ def init_trackers(accelerator, *, logging_config, tracker_config: dict, wandb_ru
         wandb_run_id = str(getattr(run, "id", wandb_run_id))
         wandb_run_name = str(getattr(run, "name", wandb_run_name))
     return wandb_run_id, wandb_run_name
-

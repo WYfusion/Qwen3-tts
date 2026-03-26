@@ -29,3 +29,4 @@ examples/wav*
 assets
 wandb
 finetuning/exp*
+docs*

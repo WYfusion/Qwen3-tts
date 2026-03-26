@@ -10,8 +10,8 @@ from qwen_tts import Qwen3TTSModel
 from qwen_tts.eval_utils import build_custom_voice_decode_kwargs, summarize_audio_array
 
 
-DEFAULT_CHECKPOINT = "./finetuning/exp/output_bznsyp_1p7b_sft-3.21/checkpoint-epoch-1"
-DEFAULT_OUTPUT_DIR = "examples/wav_3-23"
+DEFAULT_CHECKPOINT = "./finetuning/exp/output_bznsyp_1p7b_sft_3-25/checkpoint-epoch-1"
+DEFAULT_OUTPUT_DIR = "examples/wav_3-26"
 DEFAULT_SPEAKER = "bznsyp_female"
 DEFAULT_CN_TEXT = "其实我真的有发现，我是一个特别善于观察别人情绪的人。"
 DEFAULT_CN_STRESS_INSTRUCT = "用特别愤怒的语气说"
@@ -94,6 +94,7 @@ def main():
     print(model.get_supported_speakers())
 
     output_root = Path(args.output_dir)
+    output_root.mkdir(parents=True, exist_ok=True)
     manifests = {}
 
     if args.mode in {"stable", "all"}:

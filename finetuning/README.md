@@ -150,7 +150,21 @@ python prepare_data.py \
   --output_jsonl ../assets/BZNSYP_24k/codec/train_with_codes.jsonl
 ```
 
-### 5.3 启动训练
+### 5.3 使用 uv 同步训练依赖
+在使用 `uv` 时，优先执行：
+
+```bash
+uv sync
+```
+
+如果还需要系统级音频工具，例如 `sox` 和 `ffmpeg`，再执行：
+
+```bash
+sudo apt-get update
+sudo apt-get install -y ffmpeg sox libsox-fmt-all
+```
+
+### 5.4 启动训练
 
 ```bash
 python -m finetuning.scr_sft.cli \
@@ -177,7 +191,7 @@ python -m finetuning.scr_sft.cli \
   --save_training_state_steps 100
 ```
 
-### 5.4 只做 dry-run
+### 5.5 只做 dry-run
 
 ```bash
 python -m finetuning.scr_sft.cli \
@@ -188,7 +202,7 @@ python -m finetuning.scr_sft.cli \
   --dry_run
 ```
 
-### 5.5 只生成音频质检报告
+### 5.6 只生成音频质检报告
 
 ```bash
 python -m finetuning.scr_sft.cli \
