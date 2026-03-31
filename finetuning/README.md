@@ -40,6 +40,7 @@ finetuning/
     export.py
     plots.py
     diagnostics.py
+    seed_tts_eval.py
     trainer.py
 ```
 
@@ -100,6 +101,9 @@ finetuning/
 - `diagnostics.py`
   - 离线诊断已有试听目录
   - 输出 `diagnosis_report.json/csv`
+- `seed_tts_eval.py`
+  - 为 `seed-tts-eval` 准备离线评测音频
+  - 生成 `generated/*.wav`、`meta.lst` 与评测 manifest
 - `trainer.py`
   - 训练总编排器 `SFTTrainer`
   - 串联 setup / train / eval / export / finalize
@@ -143,11 +147,27 @@ python script/raw2jsonl.py \
 ### 5.2 提取 `audio_codes`
 
 ```bash
-python prepare_data.py \
+python finetuning/prepare_data.py \
   --device cuda:0 \
-  --tokenizer_model_path ../Qwen3-TTS-Tokenizer-12Hz \
-  --input_jsonl ../assets/BZNSYP_24k/ft_data/train_raw.jsonl \
-  --output_jsonl ../assets/BZNSYP_24k/codec/train_with_codes.jsonl
+  --tokenizer_model_path ./Qwen3-TTS-Tokenizer-12Hz \
+  --input_jsonl ./assets/BZNSYP_24k/ft_data/train_raw.jsonl \
+  --output_jsonl ./assets/BZNSYP_24k/codec/train_with_codes.jsonl
+```
+
+```bash
+python finetuning/prepare_data.py \
+  --device cuda:0 \
+  --tokenizer_model_path ./Qwen3-TTS-Tokenizer-12Hz \
+  --input_jsonl ./assets/BZNSYP_24k/ft_data/test_raw.jsonl \
+  --output_jsonl ./assets/BZNSYP_24k/codec/test_with_codes.jsonl
+```
+
+```bash
+python finetuning/prepare_data.py \
+  --device cuda:0 \
+  --tokenizer_model_path ./Qwen3-TTS-Tokenizer-12Hz \
+  --input_jsonl ./assets/BZNSYP_24k/ft_data/val_raw.jsonl \
+  --output_jsonl ./assets/BZNSYP_24k/codec/val_with_codes.jsonl
 ```
 
 ### 5.3 使用 uv 同步训练依赖
@@ -317,6 +337,113 @@ wavs, sr = tts.generate_custom_voice(
 )
 sf.write("finetuning_verify.wav", wavs[0], sr)
 ```
+
+### 9.1 使用 `seed-tts-eval` 做离线客观评测
+
+对于 `finetuning/exp/output_bznsyp_1p7b_sft-3.21/checkpoint-epoch-1`，推荐先生成一份专供 `seed-tts-eval` 使用的评测目录，再分别计算 WER 和 SIM。
+
+#### 9.1.1 生成评测音频与 meta
+
+```bash
+python finetuning/prepare_seed_tts_eval.py \
+  --checkpoint_dir finetuning/exp/output_bznsyp_1p7b_sft-3.21/checkpoint-epoch-1 \
+  --eval_jsonl assets/BZNSYP_24k/ft_data/test_raw.jsonl \
+  --speaker_name bznsyp_female \
+  --output_dir finetuning/exp/output_bznsyp_1p7b_sft-3.21/seed_tts_eval/checkpoint-epoch-1
+```
+
+该命令会固定使用：
+
+- `language="Chinese"`
+- `device="cuda:0"`
+- `dtype=torch.bfloat16`
+- `attn_implementation="flash_attention_2"`
+- deterministic 解码：`do_sample=False`、`top_k=1`、`top_p=1.0`、`temperature=1.0`
+- 动态长度上限：`max_new_tokens = min(256, round(target_seconds * 12.5 * 2.0))`
+
+输出目录结构如下：
+
+```text
+seed_tts_eval/checkpoint-epoch-1/
+  generated/
+    000761.wav
+    ...
+  meta.lst
+  manifest.json
+  wav_res_ref_text
+  wer.raw.txt
+  wer.summary.txt
+  sim.raw.txt
+  sim.summary.txt
+```
+
+其中：
+
+- `meta.lst` 采用 `utt|infer_text|prompt_wav` 三列格式
+- `manifest.json` 额外记录 `target_audio`、`ref_audio`、`target_seconds`、生成参数和输出 wav 路径
+
+如需和 `checkpoint-epoch-0` 做对照，直接把 `--checkpoint_dir` 和 `--output_dir` 替换成 `checkpoint-epoch-0` 即可。
+
+#### 9.1.2 安装 `seed-tts-eval` 依赖
+
+WER 侧依赖：
+
+```bash
+pip install -r seed-tts-eval/requirements.txt
+```
+
+SIM 侧依赖请参考：
+
+- `seed-tts-eval/thirdparty/UniSpeech/downstreams/speaker_verification/README.md`
+- 并提前准备 `wavlm_large_finetune.pth`
+
+建议将“生成 wav”和“跑 WER/SIM”放在两个独立环境中，避免 `speaker_verification` 旧依赖污染当前 Qwen3-TTS 训练环境。
+
+#### 9.1.3 计算 WER
+
+```bash
+python seed-tts-eval/get_wav_res_ref_text.py \
+  finetuning/exp/output_bznsyp_1p7b_sft-3.21/seed_tts_eval/checkpoint-epoch-1/meta.lst \
+  finetuning/exp/output_bznsyp_1p7b_sft-3.21/seed_tts_eval/checkpoint-epoch-1/generated \
+  finetuning/exp/output_bznsyp_1p7b_sft-3.21/seed_tts_eval/checkpoint-epoch-1/wav_res_ref_text
+
+python seed-tts-eval/prepare_ckpt.py
+
+python seed-tts-eval/run_wer.py \
+  finetuning/exp/output_bznsyp_1p7b_sft-3.21/seed_tts_eval/checkpoint-epoch-1/wav_res_ref_text \
+  finetuning/exp/output_bznsyp_1p7b_sft-3.21/seed_tts_eval/checkpoint-epoch-1/wer.raw.txt \
+  zh
+
+python seed-tts-eval/average_wer.py \
+  finetuning/exp/output_bznsyp_1p7b_sft-3.21/seed_tts_eval/checkpoint-epoch-1/wer.raw.txt \
+  finetuning/exp/output_bznsyp_1p7b_sft-3.21/seed_tts_eval/checkpoint-epoch-1/wer.summary.txt
+```
+
+#### 9.1.4 计算 SIM
+
+```bash
+python seed-tts-eval/thirdparty/UniSpeech/downstreams/speaker_verification/verification_pair_list_v2.py \
+  finetuning/exp/output_bznsyp_1p7b_sft-3.21/seed_tts_eval/checkpoint-epoch-1/wav_res_ref_text \
+  --model_name wavlm_large \
+  --checkpoint path/to/wavlm_large_finetune.pth \
+  --scores finetuning/exp/output_bznsyp_1p7b_sft-3.21/seed_tts_eval/checkpoint-epoch-1/sim.raw.txt \
+  --wav1_start_sr 0 \
+  --wav2_start_sr 0 \
+  --wav1_end_sr -1 \
+  --wav2_end_sr -1 \
+  --device cuda:0
+
+python seed-tts-eval/thirdparty/UniSpeech/downstreams/speaker_verification/average.py \
+  finetuning/exp/output_bznsyp_1p7b_sft-3.21/seed_tts_eval/checkpoint-epoch-1/sim.raw.txt \
+  finetuning/exp/output_bznsyp_1p7b_sft-3.21/seed_tts_eval/checkpoint-epoch-1/sim.summary.txt
+```
+
+#### 9.1.5 结果解释建议
+
+- `wer.summary.txt` 给出整体 WER
+- `sim.summary.txt` 给出平均 speaker similarity
+- 当前训练日志里 `checkpoint-epoch-0` 的内部 fixed-eval QC 优于 `checkpoint-epoch-1`，建议两者都跑同一套 `seed-tts-eval` 流程做外部对照
+- README 中推荐的流程不依赖 upstream `cal_wer.sh` / `cal_sim.sh`，因为它们偏 Linux / 多卡，且本地 `cal_wer.sh` 末尾汇总路径并不适合直接照搬
 
 ## 10. 设计原则
 

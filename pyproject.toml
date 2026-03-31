@@ -36,6 +36,9 @@ dependencies = [
   "psutil>=7.2.2",
   "pynvml>=13.0.1",
   "nvidia-ml-py>=13.590.48",
+  "funasr",
+  "zhconv",
+  "modelscope",
 ]
 
 [project.urls]

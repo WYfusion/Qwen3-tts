@@ -30,3 +30,5 @@ assets
 wandb
 finetuning/exp*
 docs*
+seed-tts-eval*
+weight
