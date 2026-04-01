@@ -6,11 +6,10 @@ import argparse
 import time
 import wave
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
-from qwen_tts import Qwen3TTSModel
-from qwen_tts.eval_utils import summarize_audio_array
 
 from .io_utils import ensure_dir, read_jsonl, safe_round, write_json
 
@@ -27,6 +26,9 @@ try:
     import soundfile as sf
 except ModuleNotFoundError:
     sf = None
+
+if TYPE_CHECKING:
+    from qwen_tts import Qwen3TTSModel
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -65,8 +67,11 @@ def _sync_cuda_if_needed() -> None:
         torch.cuda.synchronize()
 
 
-def _compute_max_new_tokens(target_seconds: float) -> int:
-    dynamic_cap = round(float(target_seconds) * CODE_FRAMES_PER_SECOND * DEFAULT_LENGTH_MULTIPLIER)
+def _compute_max_new_tokens(*, target_seconds: float, target_code_frames: int | None) -> int:
+    if target_code_frames is not None:
+        dynamic_cap = round(float(target_code_frames) * DEFAULT_LENGTH_MULTIPLIER)
+    else:
+        dynamic_cap = round(float(target_seconds) * CODE_FRAMES_PER_SECOND * DEFAULT_LENGTH_MULTIPLIER)
     return int(max(2, min(DEFAULT_MAX_NEW_TOKENS, dynamic_cap)))
 
 
@@ -114,8 +119,112 @@ def _write_wav(path: Path, wav: np.ndarray, sample_rate: int) -> None:
         wav_writer.writeframes(pcm.tobytes())
 
 
-def _build_decode_kwargs(target_seconds: float) -> dict[str, int | float | bool]:
-    max_new_tokens = _compute_max_new_tokens(target_seconds)
+def _to_mono_float32(wav: np.ndarray) -> np.ndarray:
+    arr = np.asarray(wav, dtype=np.float32)
+    if arr.ndim > 1:
+        arr = arr.mean(axis=1)
+    return arr
+
+
+def _trailing_low_energy_seconds(wav: np.ndarray, sample_rate: int) -> float:
+    arr = _to_mono_float32(wav)
+    if arr.size == 0 or sample_rate <= 0:
+        return 0.0
+    frame_seconds = 0.05
+    hop = max(1, int(sample_rate * frame_seconds))
+    frame_rms = []
+    for start in range(0, len(arr), hop):
+        chunk = arr[start : start + hop]
+        if chunk.size == 0:
+            continue
+        frame_rms.append(float(np.sqrt(np.mean(np.square(chunk))) + 1e-12))
+    if not frame_rms:
+        return 0.0
+    peak_rms = max(frame_rms)
+    cutoff = peak_rms * (10.0 ** (-35.0 / 20.0))
+    trailing = 0
+    for rms in reversed(frame_rms):
+        if rms <= cutoff:
+            trailing += 1
+        else:
+            break
+    return round(trailing * frame_seconds, 6)
+
+
+def _hf_noise_ratio(wav: np.ndarray, sample_rate: int) -> float:
+    arr = _to_mono_float32(wav)
+    if arr.size == 0 or sample_rate <= 0:
+        return 0.0
+    spectrum = np.fft.rfft(arr)
+    power = np.abs(spectrum) ** 2
+    total_power = float(np.sum(power))
+    if total_power <= 1e-12:
+        return 0.0
+    freqs = np.fft.rfftfreq(arr.shape[0], d=1.0 / float(sample_rate))
+    hf_power = float(np.sum(power[freqs >= 6000.0]))
+    return round(hf_power / total_power, 6)
+
+
+def _voiced_f0_delta_p95(wav: np.ndarray, sample_rate: int) -> float:
+    arr = _to_mono_float32(wav)
+    if arr.size < max(32, sample_rate // 8) or sample_rate <= 0:
+        return 0.0
+    try:
+        import librosa
+    except ModuleNotFoundError:
+        return 0.0
+    frame_length = min(2048, int(2 ** np.floor(np.log2(max(256, arr.size)))))
+    hop_length = max(128, sample_rate // 100)
+    try:
+        f0 = librosa.yin(
+            arr,
+            fmin=60.0,
+            fmax=500.0,
+            sr=sample_rate,
+            frame_length=frame_length,
+            hop_length=hop_length,
+        )
+    except Exception:
+        return 0.0
+    f0 = np.asarray(f0, dtype=np.float32)
+    voiced = f0[np.isfinite(f0) & (f0 > 0)]
+    if voiced.size < 3:
+        return 0.0
+    cents = np.abs(np.diff(np.log2(voiced))) * 1200.0
+    if cents.size == 0:
+        return 0.0
+    return round(float(np.percentile(cents, 95.0)), 6)
+
+
+def _summarize_audio_array(wav: np.ndarray, sample_rate: int) -> dict[str, float | int]:
+    arr = _to_mono_float32(wav)
+    frames = int(arr.shape[0])
+    if frames == 0:
+        peak = 0.0
+        clipped_frac = 0.0
+        rms = 0.0
+    else:
+        peak = float(np.max(np.abs(arr)))
+        clipped_frac = float(np.mean(np.abs(arr) >= 0.999))
+        rms = float(np.sqrt(np.mean(np.square(arr))) + 1e-12)
+    return {
+        "frames": frames,
+        "sample_rate": int(sample_rate),
+        "decoded_seconds": round(frames / float(sample_rate), 6) if sample_rate else 0.0,
+        "peak": round(peak, 6),
+        "clipped_frac": round(clipped_frac, 6),
+        "rms": round(rms, 6),
+        "tail_low_energy_seconds": _trailing_low_energy_seconds(arr, sample_rate),
+        "hf_noise_ratio": _hf_noise_ratio(arr, sample_rate),
+        "voiced_f0_delta_p95": _voiced_f0_delta_p95(arr, sample_rate),
+    }
+
+
+def _build_decode_kwargs(*, target_seconds: float, target_code_frames: int | None) -> dict[str, int | float | bool]:
+    max_new_tokens = _compute_max_new_tokens(
+        target_seconds=target_seconds,
+        target_code_frames=target_code_frames,
+    )
     return {
         "do_sample": False,
         "subtalker_dosample": False,
@@ -130,6 +239,8 @@ def _build_decode_kwargs(target_seconds: float) -> dict[str, int | float | bool]
 
 
 def _load_tts(checkpoint_dir: Path) -> tuple[Qwen3TTSModel, str | None]:
+    from qwen_tts import Qwen3TTSModel
+
     try:
         tts = Qwen3TTSModel.from_pretrained(
             str(checkpoint_dir),
@@ -167,7 +278,22 @@ def _normalize_eval_rows(eval_jsonl_path: Path):
 
         target_audio = _resolve_dataset_media_path(row["audio"], eval_jsonl_path=eval_jsonl_path)
         ref_audio = _resolve_dataset_media_path(row["ref_audio"], eval_jsonl_path=eval_jsonl_path)
-        target_meta = _read_audio_info(target_audio)
+        audio_codes = row.get("audio_codes")
+        if audio_codes:
+            target_code_frames = int(len(audio_codes))
+            target_seconds = float(target_code_frames) / CODE_FRAMES_PER_SECOND
+            target_sample_rate = None
+            target_frames = None
+            target_channels = None
+            target_info_source = "audio_codes"
+        else:
+            target_meta = _read_audio_info(target_audio)
+            target_code_frames = None
+            target_seconds = float(target_meta["seconds"])
+            target_sample_rate = int(target_meta["sample_rate"])
+            target_frames = int(target_meta["frames"])
+            target_channels = int(target_meta["channels"])
+            target_info_source = "audio_info"
         rows.append(
             {
                 "index": index,
@@ -177,10 +303,12 @@ def _normalize_eval_rows(eval_jsonl_path: Path):
                 "instruct": str(row.get("instruct", "")),
                 "target_audio": target_audio,
                 "ref_audio": ref_audio,
-                "target_sample_rate": int(target_meta["sample_rate"]),
-                "target_seconds": float(target_meta["seconds"]),
-                "target_frames": int(target_meta["frames"]),
-                "target_channels": int(target_meta["channels"]),
+                "target_sample_rate": target_sample_rate,
+                "target_seconds": target_seconds,
+                "target_frames": target_frames,
+                "target_channels": target_channels,
+                "target_code_frames": target_code_frames,
+                "target_info_source": target_info_source,
             }
         )
     if not rows:
@@ -211,7 +339,10 @@ def _render_samples(tts: Qwen3TTSModel, rows, *, speaker_name: str, generated_di
         )
 
     for row in rows:
-        decode_kwargs = _build_decode_kwargs(row["target_seconds"])
+        decode_kwargs = _build_decode_kwargs(
+            target_seconds=row["target_seconds"],
+            target_code_frames=row["target_code_frames"],
+        )
         _sync_cuda_if_needed()
         start = time.perf_counter()
         wavs, sample_rate = tts.generate_custom_voice(
@@ -225,7 +356,7 @@ def _render_samples(tts: Qwen3TTSModel, rows, *, speaker_name: str, generated_di
         wav = wavs[0]
         wav_path = generated_dir / f"{row['utt']}.wav"
         _write_wav(wav_path, wav, sample_rate)
-        metrics = summarize_audio_array(wav, sample_rate)
+        metrics = _summarize_audio_array(wav, sample_rate)
         generated_rows.append(
             {
                 "index": row["index"],
@@ -239,6 +370,8 @@ def _render_samples(tts: Qwen3TTSModel, rows, *, speaker_name: str, generated_di
                 "target_sample_rate": row["target_sample_rate"],
                 "target_seconds": safe_round(row["target_seconds"], 6),
                 "target_frames": row["target_frames"],
+                "target_code_frames": row["target_code_frames"],
+                "target_info_source": row["target_info_source"],
                 "generated_wav": wav_path.resolve(),
                 "generated_sample_rate": int(sample_rate),
                 "generated_seconds": metrics["decoded_seconds"],
@@ -311,7 +444,10 @@ def main(argv=None):
                 "subtalker_top_k": 1,
                 "top_p": 1.0,
                 "subtalker_top_p": 1.0,
-                "max_new_tokens_rule": "min(256, round(target_seconds * 12.5 * 2.0))",
+                "max_new_tokens_rule": (
+                    "min(256, round(target_code_frames * 2.0)) when audio_codes exist, "
+                    "else min(256, round(target_seconds * 12.5 * 2.0))"
+                ),
             },
             "samples": generated_rows,
         },

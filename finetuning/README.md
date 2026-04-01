@@ -340,17 +340,19 @@ sf.write("finetuning_verify.wav", wavs[0], sr)
 
 ### 9.1 使用 `seed-tts-eval` 做离线客观评测
 
-对于 `finetuning/exp/output_bznsyp_1p7b_sft-3.21/checkpoint-epoch-1`，推荐先生成一份专供 `seed-tts-eval` 使用的评测目录，再分别计算 WER 和 SIM。
+对于 `finetuning/exp/output_bznsyp_1p7b_sft_3-25/checkpoint-epoch-1`，推荐先生成一份专供 `seed-tts-eval` 使用的评测目录，再分别计算 WER 和 SIM。
 
 #### 9.1.1 生成评测音频与 meta
 
 ```bash
 python finetuning/prepare_seed_tts_eval.py \
-  --checkpoint_dir finetuning/exp/output_bznsyp_1p7b_sft-3.21/checkpoint-epoch-1 \
-  --eval_jsonl assets/BZNSYP_24k/ft_data/test_raw.jsonl \
+  --checkpoint_dir finetuning/exp/output_bznsyp_1p7b_sft_3-25/checkpoint-epoch-1 \
+  --eval_jsonl assets/BZNSYP_24k/codec/test_with_codes.jsonl \
   --speaker_name bznsyp_female \
-  --output_dir finetuning/exp/output_bznsyp_1p7b_sft-3.21/seed_tts_eval/checkpoint-epoch-1
+  --output_dir finetuning/exp/output_bznsyp_1p7b_sft_3-25/seed_tts_eval/checkpoint-epoch-1
 ```
+
+这里推荐直接传入已经编码好的 `assets/BZNSYP_24k/codec/test_with_codes.jsonl`。这样评测脚本会优先使用 `audio_codes` 的帧数作为目标长度参考，避免再对评测集音频做一次运行时编码。
 
 该命令会固定使用：
 
@@ -359,7 +361,8 @@ python finetuning/prepare_seed_tts_eval.py \
 - `dtype=torch.bfloat16`
 - `attn_implementation="flash_attention_2"`
 - deterministic 解码：`do_sample=False`、`top_k=1`、`top_p=1.0`、`temperature=1.0`
-- 动态长度上限：`max_new_tokens = min(256, round(target_seconds * 12.5 * 2.0))`
+- 动态长度上限：优先走 `max_new_tokens = min(256, round(target_code_frames * 2.0))`
+- 如果输入 jsonl 不含 `audio_codes`，则回退为 `max_new_tokens = min(256, round(target_seconds * 12.5 * 2.0))`
 
 输出目录结构如下：
 
@@ -380,7 +383,7 @@ seed_tts_eval/checkpoint-epoch-1/
 其中：
 
 - `meta.lst` 采用 `utt|infer_text|prompt_wav` 三列格式
-- `manifest.json` 额外记录 `target_audio`、`ref_audio`、`target_seconds`、生成参数和输出 wav 路径
+- `manifest.json` 额外记录 `target_audio`、`ref_audio`、`target_code_frames`、`target_seconds`、生成参数和输出 wav 路径
 
 如需和 `checkpoint-epoch-0` 做对照，直接把 `--checkpoint_dir` 和 `--output_dir` 替换成 `checkpoint-epoch-0` 即可。
 
@@ -396,6 +399,9 @@ SIM 侧依赖请参考：
 
 - `seed-tts-eval/thirdparty/UniSpeech/downstreams/speaker_verification/README.md`
 - 并提前准备 `wavlm_large_finetune.pth`
+- SIM 评估实际依赖两类权重：
+  1. `weight/wavlm_large_finetune.pth`
+  2. upstream `wavlm_large.pt`，默认缓存到 `seed-tts-eval/weight/huggingface`
 
 建议将“生成 wav”和“跑 WER/SIM”放在两个独立环境中，避免 `speaker_verification` 旧依赖污染当前 Qwen3-TTS 训练环境。
 
@@ -403,30 +409,44 @@ SIM 侧依赖请参考：
 
 ```bash
 python seed-tts-eval/get_wav_res_ref_text.py \
-  finetuning/exp/output_bznsyp_1p7b_sft-3.21/seed_tts_eval/checkpoint-epoch-1/meta.lst \
-  finetuning/exp/output_bznsyp_1p7b_sft-3.21/seed_tts_eval/checkpoint-epoch-1/generated \
-  finetuning/exp/output_bznsyp_1p7b_sft-3.21/seed_tts_eval/checkpoint-epoch-1/wav_res_ref_text
+  finetuning/exp/output_bznsyp_1p7b_sft_3-25/seed_tts_eval/checkpoint-epoch-1/meta.lst \
+  finetuning/exp/output_bznsyp_1p7b_sft_3-25/seed_tts_eval/checkpoint-epoch-1/generated \
+  finetuning/exp/output_bznsyp_1p7b_sft_3-25/seed_tts_eval/checkpoint-epoch-1/wav_res_ref_text
 
 python seed-tts-eval/prepare_ckpt.py
 
 python seed-tts-eval/run_wer.py \
-  finetuning/exp/output_bznsyp_1p7b_sft-3.21/seed_tts_eval/checkpoint-epoch-1/wav_res_ref_text \
-  finetuning/exp/output_bznsyp_1p7b_sft-3.21/seed_tts_eval/checkpoint-epoch-1/wer.raw.txt \
+  finetuning/exp/output_bznsyp_1p7b_sft_3-25/seed_tts_eval/checkpoint-epoch-1/wav_res_ref_text \
+  finetuning/exp/output_bznsyp_1p7b_sft_3-25/seed_tts_eval/checkpoint-epoch-1/wer.raw.txt \
   zh
 
 python seed-tts-eval/average_wer.py \
-  finetuning/exp/output_bznsyp_1p7b_sft-3.21/seed_tts_eval/checkpoint-epoch-1/wer.raw.txt \
-  finetuning/exp/output_bznsyp_1p7b_sft-3.21/seed_tts_eval/checkpoint-epoch-1/wer.summary.txt
+  finetuning/exp/output_bznsyp_1p7b_sft_3-25/seed_tts_eval/checkpoint-epoch-1/wer.raw.txt \
+  finetuning/exp/output_bznsyp_1p7b_sft_3-25/seed_tts_eval/checkpoint-epoch-1/wer.summary.txt
+```
+其中中文 WER 使用 `funasr` / `paraformer-zh`，如果你当前是 Python 3.12 环境且 `hydra` 导入时报 dataclass mutable default 错误，请改用单独的 Python 3.10/3.11 评估环境。
+
+`run_wer.py` 默认会复用 `seed-tts-eval/weight/huggingface` 与 `seed-tts-eval/weight/modelscope` 下的已下载权重，并默认使用 `https://hf-mirror.com`。如果你需要显式指定，也可以追加：
+
+```bash
+  --hf_cache_dir seed-tts-eval/weight/huggingface \
+  --modelscope_cache_dir seed-tts-eval/weight/modelscope \
+  --hf_endpoint https://hf-mirror.com
 ```
 
 #### 9.1.4 计算 SIM
 
 ```bash
+python seed-tts-eval/prepare_ckpt.py \
+  --prepare_sim \
+  --sim_model_name wavlm_large \
+  --sim_finetune_checkpoint weight/wavlm_large_finetune.pth
+
 python seed-tts-eval/thirdparty/UniSpeech/downstreams/speaker_verification/verification_pair_list_v2.py \
-  finetuning/exp/output_bznsyp_1p7b_sft-3.21/seed_tts_eval/checkpoint-epoch-1/wav_res_ref_text \
+  finetuning/exp/output_bznsyp_1p7b_sft_3-25/seed_tts_eval/checkpoint-epoch-1/wav_res_ref_text \
   --model_name wavlm_large \
-  --checkpoint path/to/wavlm_large_finetune.pth \
-  --scores finetuning/exp/output_bznsyp_1p7b_sft-3.21/seed_tts_eval/checkpoint-epoch-1/sim.raw.txt \
+  --checkpoint weight/wavlm_large_finetune.pth \
+  --scores finetuning/exp/output_bznsyp_1p7b_sft_3-25/seed_tts_eval/checkpoint-epoch-1/sim.raw.txt \
   --wav1_start_sr 0 \
   --wav2_start_sr 0 \
   --wav1_end_sr -1 \
@@ -434,9 +454,24 @@ python seed-tts-eval/thirdparty/UniSpeech/downstreams/speaker_verification/verif
   --device cuda:0
 
 python seed-tts-eval/thirdparty/UniSpeech/downstreams/speaker_verification/average.py \
-  finetuning/exp/output_bznsyp_1p7b_sft-3.21/seed_tts_eval/checkpoint-epoch-1/sim.raw.txt \
-  finetuning/exp/output_bznsyp_1p7b_sft-3.21/seed_tts_eval/checkpoint-epoch-1/sim.summary.txt
+  finetuning/exp/output_bznsyp_1p7b_sft_3-25/seed_tts_eval/checkpoint-epoch-1/sim.raw.txt \
+  finetuning/exp/output_bznsyp_1p7b_sft_3-25/seed_tts_eval/checkpoint-epoch-1/sim.summary.txt
 ```
+
+`verification_pair_list_v2.py` 现在默认会优先复用 `seed-tts-eval/weight/huggingface` 下的 repo-local upstream cache，不再依赖每次运行都在线拉取 `s3prl/s3prl`。如需显式指定本地 upstream ckpt，可追加：
+
+```bash
+  --upstream_ckpt /abs/path/to/wavlm_large.pt
+```
+
+如果你在一台可联网 Ubuntu 上已经跑通，想把缓存拷到另一台离线或网络受限机器，至少复制以下目录/文件：
+
+```bash
+seed-tts-eval/weight/huggingface/
+weight/wavlm_large_finetune.pth
+```
+
+只要 upstream `wavlm_large.pt` 已在上述 Hugging Face cache 中，SIM 初始化就会优先命中本地缓存；如果缓存缺失且网络不可用，脚本会在模型初始化阶段直接报错退出，而不是在每个样本上重复卡住。
 
 #### 9.1.5 结果解释建议
 
