@@ -35,7 +35,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint_dir", type=str, required=True)
     parser.add_argument("--eval_jsonl", type=str, required=True)
-    parser.add_argument("--speaker_name", type=str, required=True)
+    parser.add_argument("--speaker_name", type=str, default=None)
     parser.add_argument("--output_dir", type=str, required=True)
     return parser
 
@@ -329,14 +329,20 @@ def _write_placeholder(path: Path) -> None:
         path.write_text("", encoding="utf-8")
 
 
-def _render_samples(tts: Qwen3TTSModel, rows, *, speaker_name: str, generated_dir: Path):
+def _render_samples(tts: Qwen3TTSModel, rows, *, speaker_name: str | None, generated_dir: Path):
     generated_rows = []
-    supported_speakers = set(tts.get_supported_speakers())
-    if speaker_name not in supported_speakers:
-        raise ValueError(
-            f"Speaker `{speaker_name}` is not supported by {tts.model.config._name_or_path if hasattr(tts.model.config, '_name_or_path') else 'checkpoint'}: "
-            f"{sorted(supported_speakers)}"
-        )
+    model_type = getattr(tts.model, "tts_model_type", None)
+    use_voice_clone = model_type == "base"
+
+    if not use_voice_clone:
+        supported_speakers = set(tts.get_supported_speakers())
+        if not speaker_name:
+            raise ValueError("Custom voice evaluation requires --speaker_name.")
+        if speaker_name not in supported_speakers:
+            raise ValueError(
+                f"Speaker `{speaker_name}` is not supported by {tts.model.config._name_or_path if hasattr(tts.model.config, '_name_or_path') else 'checkpoint'}: "
+                f"{sorted(supported_speakers)}"
+            )
 
     for row in rows:
         decode_kwargs = _build_decode_kwargs(
@@ -345,13 +351,24 @@ def _render_samples(tts: Qwen3TTSModel, rows, *, speaker_name: str, generated_di
         )
         _sync_cuda_if_needed()
         start = time.perf_counter()
-        wavs, sample_rate = tts.generate_custom_voice(
-            text=row["text"],
-            language=row["language"],
-            speaker=speaker_name,
-            instruct=row["instruct"],
-            **decode_kwargs,
-        )
+        if use_voice_clone:
+            wavs, sample_rate = tts.generate_voice_clone(
+                text=row["text"],
+                language=row["language"],
+                ref_audio=str(row["ref_audio"]),
+                x_vector_only_mode=True,
+                **decode_kwargs,
+            )
+            speaker_value = "voice_clone"
+        else:
+            wavs, sample_rate = tts.generate_custom_voice(
+                text=row["text"],
+                language=row["language"],
+                speaker=speaker_name,
+                instruct=row["instruct"],
+                **decode_kwargs,
+            )
+            speaker_value = str(speaker_name)
         _sync_cuda_if_needed()
         wav = wavs[0]
         wav_path = generated_dir / f"{row['utt']}.wav"
@@ -364,7 +381,7 @@ def _render_samples(tts: Qwen3TTSModel, rows, *, speaker_name: str, generated_di
                 "text": row["text"],
                 "language": row["language"],
                 "instruct": row["instruct"],
-                "speaker": speaker_name,
+                "speaker": speaker_value,
                 "target_audio": row["target_audio"],
                 "ref_audio": row["ref_audio"],
                 "target_sample_rate": row["target_sample_rate"],
@@ -432,6 +449,7 @@ def main(argv=None):
             "num_samples": len(generated_rows),
             "language_default": DEFAULT_LANGUAGE,
             "speaker_name": args.speaker_name,
+            "tts_model_type": getattr(tts.model, "tts_model_type", None),
             "device": DEFAULT_DEVICE,
             "dtype": str(DEFAULT_DTYPE),
             "attn_implementation": attn_implementation,
