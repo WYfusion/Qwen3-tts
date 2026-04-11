@@ -37,6 +37,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--eval_jsonl", type=str, required=True)
     parser.add_argument("--speaker_name", type=str, default=None)
     parser.add_argument("--output_dir", type=str, required=True)
+    parser.add_argument("--device", type=str, default=DEFAULT_DEVICE)
     return parser
 
 
@@ -238,13 +239,13 @@ def _build_decode_kwargs(*, target_seconds: float, target_code_frames: int | Non
     }
 
 
-def _load_tts(checkpoint_dir: Path) -> tuple[Qwen3TTSModel, str | None]:
+def _load_tts(checkpoint_dir: Path, *, device: str) -> tuple[Qwen3TTSModel, str | None]:
     from qwen_tts import Qwen3TTSModel
 
     try:
         tts = Qwen3TTSModel.from_pretrained(
             str(checkpoint_dir),
-            device_map=DEFAULT_DEVICE,
+            device_map=device,
             dtype=DEFAULT_DTYPE,
             attn_implementation=DEFAULT_ATTN_IMPLEMENTATION,
         )
@@ -253,7 +254,7 @@ def _load_tts(checkpoint_dir: Path) -> tuple[Qwen3TTSModel, str | None]:
         print(f"flash_attention_2 unavailable, falling back to eager attention: {exc}")
         tts = Qwen3TTSModel.from_pretrained(
             str(checkpoint_dir),
-            device_map=DEFAULT_DEVICE,
+            device_map=device,
             dtype=DEFAULT_DTYPE,
             attn_implementation=None,
         )
@@ -425,7 +426,7 @@ def main(argv=None):
     for artifact_name in ("wav_res_ref_text", "wer.raw.txt", "wer.summary.txt", "sim.raw.txt", "sim.summary.txt"):
         _write_placeholder(output_dir / artifact_name)
 
-    tts, attn_implementation = _load_tts(checkpoint_dir)
+    tts, attn_implementation = _load_tts(checkpoint_dir, device=args.device)
     generated_rows = _render_samples(
         tts,
         eval_rows,
@@ -450,7 +451,7 @@ def main(argv=None):
             "language_default": DEFAULT_LANGUAGE,
             "speaker_name": args.speaker_name,
             "tts_model_type": getattr(tts.model, "tts_model_type", None),
-            "device": DEFAULT_DEVICE,
+            "device": args.device,
             "dtype": str(DEFAULT_DTYPE),
             "attn_implementation": attn_implementation,
             "decode_policy": {

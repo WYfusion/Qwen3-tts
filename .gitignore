@@ -32,3 +32,7 @@ finetuning/exp*
 docs*
 seed-tts-eval*
 weight
+.agents*
+skills-lock.json
+tests*
+tmp

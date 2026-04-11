@@ -50,16 +50,25 @@ def export_inference_checkpoint(
 def write_best_checkpoint_record(
     output_dir: Path,
     *,
-    best_epoch: int,
-    best_checkpoint_path: str,
-    best_qc_score: float,
-    best_eval_name: str,
+    primary_checkpoint_path: str,
+    primary_epoch: int,
+    best_safe_checkpoint: dict,
+    best_benchmark_checkpoint: dict | None,
+    benchmark_goal_met: bool,
+    final_full_benchmark: dict | None = None,
 ):
     payload = {
-        "best_epoch": int(best_epoch),
-        "best_checkpoint_path": str(best_checkpoint_path),
-        "best_qc_score": float(best_qc_score),
-        "best_eval_name": str(best_eval_name),
+        "best_epoch": int(primary_epoch),
+        "best_checkpoint_path": str(primary_checkpoint_path),
+        "primary_epoch": int(primary_epoch),
+        "primary_checkpoint_path": str(primary_checkpoint_path),
+        "benchmark_goal_met": bool(benchmark_goal_met),
+        "best_safe_checkpoint": best_safe_checkpoint,
+        "best_benchmark_checkpoint": best_benchmark_checkpoint,
+        "final_full_benchmark": final_full_benchmark,
     }
+    if best_safe_checkpoint:
+        payload["best_qc_score"] = float(best_safe_checkpoint.get("best_qc_score", 0.0))
+        payload["best_eval_name"] = str(best_safe_checkpoint.get("best_eval_name", ""))
     write_json(output_dir / "best_checkpoint.json", payload)
     return payload

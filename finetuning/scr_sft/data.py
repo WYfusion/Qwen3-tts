@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Any, List, Tuple, Union
 
@@ -308,6 +309,18 @@ def infer_fixed_eval_source_path(train_jsonl: str) -> Path:
     )
 
 
+def infer_benchmark_eval_source_path(train_jsonl: str) -> Path:
+    """从训练集路径推断 benchmark 评测源文件路径。"""
+    path = Path(train_jsonl)
+    candidate = path.with_name("test_with_codes.jsonl")
+    if candidate.exists():
+        return candidate
+    raise FileNotFoundError(
+        f"Could not infer benchmark eval jsonl from train_jsonl={train_jsonl}. "
+        "Pass --benchmark_eval_jsonl explicitly."
+    )
+
+
 def make_sample_id(idx: int, audio_path: str, used_ids: set[str]) -> str:
     """基于音频文件名生成稳定且不重复的 sample_id。"""
     stem = Path(audio_path).stem
@@ -362,6 +375,110 @@ def build_fixed_eval_rows(raw_rows, speech_tokenizer, speaker_name: str, default
     return fixed_rows
 
 
+def row_duration_seconds(row: dict) -> float:
+    if row.get("target_seconds") is not None:
+        return float(row["target_seconds"])
+    audio_path = row.get("audio")
+    if audio_path:
+        return float(audio_info(audio_path)["seconds"])
+    audio_codes = row.get("audio_codes")
+    if audio_codes:
+        return float(len(audio_codes)) / 12.5
+    return 0.0
+
+
+def _stable_row_key(row: dict, idx: int) -> tuple:
+    return (
+        str(row.get("sample_id", "")),
+        str(row.get("audio", "")),
+        str(row.get("text", "")),
+        int(idx),
+    )
+
+
+def _split_sorted_rows(rows, *, groups: int) -> list[list[tuple[int, dict]]]:
+    if groups <= 0:
+        return []
+    indexed = list(enumerate(rows))
+    indexed.sort(key=lambda item: (row_duration_seconds(item[1]), _stable_row_key(item[1], item[0])))
+    total = len(indexed)
+    base = total // groups
+    remainder = total % groups
+    buckets = []
+    start = 0
+    for bucket_idx in range(groups):
+        size = base + (1 if bucket_idx < remainder else 0)
+        end = start + size
+        buckets.append(indexed[start:end])
+        start = end
+    return buckets
+
+
+def _allocate_counts(total: int, bucket_sizes: list[int]) -> list[int]:
+    if total <= 0 or not bucket_sizes:
+        return [0 for _ in bucket_sizes]
+    available = sum(bucket_sizes)
+    if available <= total:
+        return list(bucket_sizes)
+    raw = [(float(size) / float(available)) * float(total) if available > 0 else 0.0 for size in bucket_sizes]
+    counts = [min(bucket_sizes[idx], int(math.floor(value))) for idx, value in enumerate(raw)]
+    remaining = total - sum(counts)
+    order = sorted(
+        range(len(bucket_sizes)),
+        key=lambda idx: (raw[idx] - counts[idx], bucket_sizes[idx], -idx),
+        reverse=True,
+    )
+    while remaining > 0:
+        progressed = False
+        for idx in order:
+            if counts[idx] >= bucket_sizes[idx]:
+                continue
+            counts[idx] += 1
+            remaining -= 1
+            progressed = True
+            if remaining == 0:
+                break
+        if not progressed:
+            break
+    return counts
+
+
+def _pick_evenly_spaced(indexed_rows: list[tuple[int, dict]], count: int) -> list[dict]:
+    if count <= 0 or not indexed_rows:
+        return []
+    if count >= len(indexed_rows):
+        return [row for _idx, row in indexed_rows]
+    if count == 1:
+        return [indexed_rows[len(indexed_rows) // 2][1]]
+    positions = [round(i * (len(indexed_rows) - 1) / (count - 1)) for i in range(count)]
+    selected = []
+    used = set()
+    for pos in positions:
+        pos = max(0, min(len(indexed_rows) - 1, int(pos)))
+        while pos in used and pos + 1 < len(indexed_rows):
+            pos += 1
+        if pos in used:
+            pos = min(idx for idx in range(len(indexed_rows)) if idx not in used)
+        used.add(pos)
+        selected.append(indexed_rows[pos][1])
+    return selected
+
+
+def duration_stratified_sample(rows, sample_count: int):
+    if sample_count <= 0 or not rows:
+        return []
+    if len(rows) <= sample_count:
+        return list(rows)
+    buckets = _split_sorted_rows(rows, groups=min(3, len(rows)))
+    counts = _allocate_counts(sample_count, [len(bucket) for bucket in buckets])
+    picked = []
+    for bucket, count in zip(buckets, counts):
+        picked.extend(_pick_evenly_spaced(bucket, count))
+    indexed_selected = list(enumerate(picked))
+    indexed_selected.sort(key=lambda item: _stable_row_key(item[1], item[0]))
+    return [row for _idx, row in indexed_selected[:sample_count]]
+
+
 def prepare_fixed_eval_set(*, train_jsonl: str, fixed_eval_jsonl: str | None, fixed_eval_source_jsonl: str | None, fixed_eval_num_samples: int, fixed_eval_language: str, speaker_name: str, speech_tokenizer, logs_dir: Path):
     """准备固定评测集，必要时自动重建。
 
@@ -387,10 +504,10 @@ def prepare_fixed_eval_set(*, train_jsonl: str, fixed_eval_jsonl: str | None, fi
     rebuild = True
     if eval_path.exists():
         rows = read_jsonl(eval_path)
-        if fixed_eval_rows_are_valid(rows):
+        if fixed_eval_rows_are_valid(rows) and len(rows) == int(fixed_eval_num_samples):
             rebuild = False
     if rebuild:
-        source_rows = read_jsonl(source_path)[:fixed_eval_num_samples]
+        source_rows = duration_stratified_sample(read_jsonl(source_path), fixed_eval_num_samples)
         fixed_rows = build_fixed_eval_rows(
             source_rows,
             speech_tokenizer=speech_tokenizer,
@@ -432,4 +549,3 @@ def build_epoch_dataloader(dataset, batch_size, collate_fn, epoch: int, seed: in
     indices = torch.randperm(len(dataset), generator=generator).tolist()
     epoch_subset = Subset(dataset, indices)
     return DataLoader(epoch_subset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
-

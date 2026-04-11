@@ -23,9 +23,46 @@ class TrainingStateTracker:
         self.best_checkpoint_path = ""
         self.best_epoch = -1
         self.best_eval_name = ""
+        self.best_safe_qc_score = None
+        self.best_safe_checkpoint_path = ""
+        self.best_safe_epoch = -1
+        self.best_safe_eval_name = ""
+        self.best_benchmark_checkpoint_path = ""
+        self.best_benchmark_epoch = -1
+        self.best_benchmark_objective = None
+        self.best_benchmark_wer = None
+        self.best_benchmark_asv = None
+        self.best_benchmark_asv_std = None
+        self.benchmark_goal_met = False
         self.epochs_since_improvement = 0
 
-    def mark_progress(self, *, next_epoch: int, next_batch_in_epoch: int, global_step: int, last_step_checkpoint: str = "", last_reason: str = "", wandb_run_id: str | None = None, wandb_run_name: str | None = None, best_qc_score=None, best_checkpoint_path: str | None = None, best_epoch: int | None = None, best_eval_name: str | None = None, epochs_since_improvement: int | None = None):
+    def mark_progress(
+        self,
+        *,
+        next_epoch: int,
+        next_batch_in_epoch: int,
+        global_step: int,
+        last_step_checkpoint: str = "",
+        last_reason: str = "",
+        wandb_run_id: str | None = None,
+        wandb_run_name: str | None = None,
+        best_qc_score=None,
+        best_checkpoint_path: str | None = None,
+        best_epoch: int | None = None,
+        best_eval_name: str | None = None,
+        best_safe_qc_score=None,
+        best_safe_checkpoint_path: str | None = None,
+        best_safe_epoch: int | None = None,
+        best_safe_eval_name: str | None = None,
+        best_benchmark_checkpoint_path: str | None = None,
+        best_benchmark_epoch: int | None = None,
+        best_benchmark_objective=None,
+        best_benchmark_wer=None,
+        best_benchmark_asv=None,
+        best_benchmark_asv_std=None,
+        benchmark_goal_met: bool | None = None,
+        epochs_since_improvement: int | None = None,
+    ):
         self.next_epoch = int(next_epoch)
         self.next_batch_in_epoch = int(next_batch_in_epoch)
         self.global_step = int(global_step)
@@ -43,6 +80,32 @@ class TrainingStateTracker:
             self.best_epoch = int(best_epoch)
         if best_eval_name is not None:
             self.best_eval_name = str(best_eval_name)
+        if best_safe_qc_score is not None:
+            self.best_safe_qc_score = float(best_safe_qc_score)
+            self.best_qc_score = self.best_safe_qc_score
+        if best_safe_checkpoint_path is not None:
+            self.best_safe_checkpoint_path = str(best_safe_checkpoint_path)
+            self.best_checkpoint_path = self.best_safe_checkpoint_path
+        if best_safe_epoch is not None:
+            self.best_safe_epoch = int(best_safe_epoch)
+            self.best_epoch = self.best_safe_epoch
+        if best_safe_eval_name is not None:
+            self.best_safe_eval_name = str(best_safe_eval_name)
+            self.best_eval_name = self.best_safe_eval_name
+        if best_benchmark_checkpoint_path is not None:
+            self.best_benchmark_checkpoint_path = str(best_benchmark_checkpoint_path)
+        if best_benchmark_epoch is not None:
+            self.best_benchmark_epoch = int(best_benchmark_epoch)
+        if best_benchmark_objective is not None:
+            self.best_benchmark_objective = float(best_benchmark_objective)
+        if best_benchmark_wer is not None:
+            self.best_benchmark_wer = float(best_benchmark_wer)
+        if best_benchmark_asv is not None:
+            self.best_benchmark_asv = float(best_benchmark_asv)
+        if best_benchmark_asv_std is not None:
+            self.best_benchmark_asv_std = float(best_benchmark_asv_std)
+        if benchmark_goal_met is not None:
+            self.benchmark_goal_met = bool(benchmark_goal_met)
         if epochs_since_improvement is not None:
             self.epochs_since_improvement = int(epochs_since_improvement)
 
@@ -59,6 +122,17 @@ class TrainingStateTracker:
             "best_checkpoint_path": self.best_checkpoint_path,
             "best_epoch": self.best_epoch,
             "best_eval_name": self.best_eval_name,
+            "best_safe_qc_score": self.best_safe_qc_score,
+            "best_safe_checkpoint_path": self.best_safe_checkpoint_path,
+            "best_safe_epoch": self.best_safe_epoch,
+            "best_safe_eval_name": self.best_safe_eval_name,
+            "best_benchmark_checkpoint_path": self.best_benchmark_checkpoint_path,
+            "best_benchmark_epoch": self.best_benchmark_epoch,
+            "best_benchmark_objective": self.best_benchmark_objective,
+            "best_benchmark_wer": self.best_benchmark_wer,
+            "best_benchmark_asv": self.best_benchmark_asv,
+            "best_benchmark_asv_std": self.best_benchmark_asv_std,
+            "benchmark_goal_met": self.benchmark_goal_met,
             "epochs_since_improvement": self.epochs_since_improvement,
         }
 
@@ -74,6 +148,23 @@ class TrainingStateTracker:
         self.best_checkpoint_path = str(state_dict.get("best_checkpoint_path", ""))
         self.best_epoch = int(state_dict.get("best_epoch", -1))
         self.best_eval_name = str(state_dict.get("best_eval_name", ""))
+        self.best_safe_qc_score = None if state_dict.get("best_safe_qc_score") in (None, "") else float(state_dict.get("best_safe_qc_score"))
+        self.best_safe_checkpoint_path = str(state_dict.get("best_safe_checkpoint_path", "")) or self.best_checkpoint_path
+        self.best_safe_epoch = int(state_dict.get("best_safe_epoch", self.best_epoch))
+        self.best_safe_eval_name = str(state_dict.get("best_safe_eval_name", "")) or self.best_eval_name
+        self.best_benchmark_checkpoint_path = str(state_dict.get("best_benchmark_checkpoint_path", ""))
+        self.best_benchmark_epoch = int(state_dict.get("best_benchmark_epoch", -1))
+        self.best_benchmark_objective = (
+            None if state_dict.get("best_benchmark_objective") in (None, "") else float(state_dict.get("best_benchmark_objective"))
+        )
+        self.best_benchmark_wer = None if state_dict.get("best_benchmark_wer") in (None, "") else float(state_dict.get("best_benchmark_wer"))
+        self.best_benchmark_asv = None if state_dict.get("best_benchmark_asv") in (None, "") else float(state_dict.get("best_benchmark_asv"))
+        self.best_benchmark_asv_std = (
+            None if state_dict.get("best_benchmark_asv_std") in (None, "") else float(state_dict.get("best_benchmark_asv_std"))
+        )
+        self.benchmark_goal_met = bool(state_dict.get("benchmark_goal_met", False))
+        if self.best_safe_qc_score is None:
+            self.best_safe_qc_score = self.best_qc_score
         self.epochs_since_improvement = int(state_dict.get("epochs_since_improvement", 0))
 
 

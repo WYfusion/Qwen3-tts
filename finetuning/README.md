@@ -37,6 +37,7 @@ finetuning/
     state.py
     audio_qc.py
     eval_audio.py
+    benchmark_eval.py
     export.py
     plots.py
     diagnostics.py
@@ -92,6 +93,11 @@ finetuning/
   - manifest 生成
   - QC 分数计算
   - wandb 音频表记录
+- `benchmark_eval.py`
+  - 训练期 `seed-tts-eval` 桥接
+  - Base baseline 缓存
+  - benchmark subset 分层抽样
+  - WER / ASV 解析与 benchmark 选模
 - `export.py`
   - custom voice inference checkpoint 导出
   - `best_checkpoint.json` 维护
@@ -110,20 +116,23 @@ finetuning/
 
 ## 4. 模型与训练策略
 
-当前单说话人 SFT 方案保持以下核心行为不变：
+当前单说话人 SFT 方案保持以下核心行为：
 
 - 基座模型从 `Qwen3-TTS-12Hz-1.7B-Base` 初始化
 - 自定义 speaker slot 固定为 `3000`
-- 训练配方默认是 `staged_stable_sft`
+- 训练配方默认是 `staged_benchmark_aligned_sft`
 - 保留 `legacy_full_sft` 作为兼容配方
 - 训练中同时进行 capped eval 和 free-run eval
-- 选模只看 free-run QC，不看训练 loss
+- 保留 QC 安全门，但选模不再只看 4 条试听代理指标
 
 当前默认策略的关键点：
 
-- Stage 1 只开放高层 `talker` 模块与自定义 speaker row
-- Stage 2 再解冻 `talker.model.layers.20-27.*` 与 `talker.code_predictor.*`
-- teacher 固定为 base 模型，用于保持时长、EOS 和高层生成先验
+- Stage 1 训练 `speaker_row + head + upper_layers`
+- Stage 2 在此基础上加入 `mid_layers + code_predictor`
+- Stage 3 再加入 `lower_mid_layers`
+- teacher 固定为 base 模型，但 KD 权重按 stage 缩放：`2.0x -> 1.0x -> 0.6x`
+- custom speaker row 不再只用第一条样本初始化，而是用多参考均值初始化
+- 每个 epoch 额外跑一份 benchmark subset，并同时记录 `WER + ASV`
 - 导出 checkpoint 时不修改 `generation_config.json` 默认采样逻辑
 
 ## 5. 标准训练流程
@@ -189,25 +198,34 @@ sudo apt-get install -y ffmpeg sox libsox-fmt-all
 ```bash
 python -m finetuning.scr_sft.cli \
   --init_model_path ./Qwen3-TTS-12Hz-1.7B-Base \
-  --output_model_path finetuning/exp/output_bznsyp_1p7b_sft \
+  --output_model_path finetuning/exp/output_bznsyp_1p7b_sft-4-11 \
   --train_jsonl ./assets/BZNSYP_24k/codec/train_with_codes.jsonl \
   --speaker_name bznsyp_female \
   --batch_size 2 \
   --gradient_accumulation_steps 4 \
-  --training_recipe staged_stable_sft \
+  --training_recipe staged_benchmark_aligned_sft \
   --stage1_epochs 1 \
-  --stage2_epochs 3 \
+  --stage2_epochs 2 \
+  --stage3_epochs 2 \
   --main_kd_weight 0.1 \
   --sub_kd_weight 0.05 \
   --kd_temperature 2.0 \
-  --fixed_eval_num_samples 4 \
+  --speaker_init_num_samples 16 \
+  --fixed_eval_num_samples 24 \
   --enable_free_run_eval \
   --free_run_eval_max_new_tokens 8192 \
+  --benchmark_eval_jsonl ./assets/BZNSYP_24k/codec/test_with_codes.jsonl \
+  --benchmark_eval_num_samples 48 \
+  --benchmark_eval_every_epochs 1 \
+  --seed_tts_eval_root ./seed-tts-eval \
+  --seed_tts_eval_python python3 \
+  --benchmark_eval_device cuda:0 \
+  --sim_finetune_checkpoint ./seed-tts-eval/weight/wavlm_large_finetune.pth \
   --peak_warn_threshold 0.99 \
   --clipped_frac_warn_threshold 1e-6 \
   --hf_noise_warn_threshold 0.12 \
   --voiced_f0_delta_warn_threshold 180 \
-  --early_stop_patience 1 \
+  --early_stop_patience 2 \
   --save_training_state_steps 100
 ```
 
@@ -235,7 +253,7 @@ python -m finetuning.scr_sft.cli \
 
 ## 6. 训练期评估
 
-训练期包含两条评估路径：
+训练期包含三条评估路径：
 
 - `fixed_eval`
   - 受控试听
@@ -243,6 +261,10 @@ python -m finetuning.scr_sft.cli \
 - `free_run_eval`
   - 默认生成路径回归验证
   - 不按目标时长限长，只保留全局安全上限
+- `benchmark_eval`
+  - 通过 `seed-tts-eval` 跑 WER / ASV
+  - 先缓存 Base 全量基线，再抽取难度分层的 subset
+  - 每个 epoch 对导出 checkpoint 跑 subset，用于对齐外部目标
 
 训练期统一记录这些指标：
 
@@ -265,6 +287,19 @@ python -m finetuning.scr_sft.cli \
 - `free_run_cap_hit_rate > 0`
 - QC 连续 `early_stop_patience` 个 epoch 无提升
 
+当前选模规则：
+
+- `best_safe_checkpoint`
+  - 仍由 free-run / fixed-eval 的 `qc_score` 驱动
+  - 负责安全回退
+- `best_benchmark_checkpoint`
+  - 必须先满足 free-run 安全门
+  - 只在 `WER < Base` 且 `ASV > Base` 时才有资格成为 benchmark best
+  - tie-break 依次看 `benchmark_wer`、`benchmark_asv`、`free_run_qc_score`
+- `best_checkpoint.json`
+  - 同时写入 `best_safe_checkpoint`、`best_benchmark_checkpoint`
+  - 若 benchmark 目标达成，则默认主部署点为 benchmark best；否则回退 safe best
+
 ## 7. 产物目录
 
 ```text
@@ -279,6 +314,7 @@ output_model_path/
     plots/
     fixed_eval_audio/
     free_run_eval_audio/
+    benchmark_eval/
     anomaly_batches/
 ```
 
@@ -290,12 +326,16 @@ output_model_path/
   - step 级训练指标
 - `logs/metrics/train_epoch_metrics.csv`
   - epoch 级训练指标
+- `logs/metrics/benchmark_epoch_metrics.csv`
+  - epoch 级 benchmark WER / ASV / objective
 - `logs/fixed_eval_audio/<checkpoint>/manifest.json`
   - 受控试听 manifest
 - `logs/free_run_eval_audio/<checkpoint>/manifest.json`
   - 默认生成路径 manifest
+- `logs/benchmark_eval/benchmark_subset_manifest.json`
+  - 本轮训练使用的 benchmark subset 清单
 - `best_checkpoint.json`
-  - 当前 free-run QC 最优 checkpoint
+  - 同时记录 safe best、benchmark best 与主部署 checkpoint
 
 ## 8. 诊断与绘图
 
@@ -430,9 +470,9 @@ pip install -r seed-tts-eval/requirements.txt
 SIM 侧依赖请参考：
 
 - `seed-tts-eval/thirdparty/UniSpeech/downstreams/speaker_verification/README.md`
-- 并提前准备 `wavlm_large_finetune.pth`
+- 并提前准备 `seed-tts-eval/weight/wavlm_large_finetune.pth`
 - SIM 评估实际依赖两类权重：
-  1. `weight/wavlm_large_finetune.pth`
+  1. `seed-tts-eval/weight/wavlm_large_finetune.pth`
   2. upstream `wavlm_large.pt`，默认缓存到 `seed-tts-eval/weight/huggingface`
 
 建议将“生成 wav”和“跑 WER/SIM”放在两个独立环境中，避免 `speaker_verification` 旧依赖污染当前 Qwen3-TTS 训练环境。
@@ -508,12 +548,12 @@ python seed-tts-eval/average_wer.py \
 python seed-tts-eval/prepare_ckpt.py \
   --prepare_sim \
   --sim_model_name wavlm_large \
-  --sim_finetune_checkpoint weight/wavlm_large_finetune.pth
+  --sim_finetune_checkpoint ./seed-tts-eval/weight/wavlm_large_finetune.pth
 
 python seed-tts-eval/thirdparty/UniSpeech/downstreams/speaker_verification/verification_pair_list_v2.py \
   finetuning/exp/output_bznsyp_1p7b_sft_3-25/seed_tts_eval/checkpoint-epoch-1/wav_res_ref_text \
   --model_name wavlm_large \
-  --checkpoint weight/wavlm_large_finetune.pth \
+  --checkpoint ./seed-tts-eval/weight/wavlm_large_finetune.pth \
   --scores finetuning/exp/output_bznsyp_1p7b_sft_3-25/seed_tts_eval/checkpoint-epoch-1/sim.raw.txt \
   --wav1_start_sr 0 \
   --wav2_start_sr 0 \
@@ -529,12 +569,12 @@ python seed-tts-eval/thirdparty/UniSpeech/downstreams/speaker_verification/avera
 python seed-tts-eval/prepare_ckpt.py \
   --prepare_sim \
   --sim_model_name wavlm_large \
-  --sim_finetune_checkpoint weight/wavlm_large_finetune.pth
+  --sim_finetune_checkpoint ./seed-tts-eval/weight/wavlm_large_finetune.pth
 
 python seed-tts-eval/thirdparty/UniSpeech/downstreams/speaker_verification/verification_pair_list_v2.py \
   finetuning/exp/output_bznsyp_1p7b_sft_3-25/seed_tts_eval/checkpoint-epoch-0/wav_res_ref_text \
   --model_name wavlm_large \
-  --checkpoint weight/wavlm_large_finetune.pth \
+  --checkpoint ./seed-tts-eval/weight/wavlm_large_finetune.pth \
   --scores finetuning/exp/output_bznsyp_1p7b_sft_3-25/seed_tts_eval/checkpoint-epoch-0/sim.raw.txt \
   --wav1_start_sr 0 \
   --wav2_start_sr 0 \
@@ -552,12 +592,12 @@ python seed-tts-eval/thirdparty/UniSpeech/downstreams/speaker_verification/avera
 python seed-tts-eval/prepare_ckpt.py \
   --prepare_sim \
   --sim_model_name wavlm_large \
-  --sim_finetune_checkpoint weight/wavlm_large_finetune.pth
+  --sim_finetune_checkpoint ./seed-tts-eval/weight/wavlm_large_finetune.pth
 
 python seed-tts-eval/thirdparty/UniSpeech/downstreams/speaker_verification/verification_pair_list_v2.py \
   finetuning/exp/base_seed_tts_eval/wav_res_ref_text \
   --model_name wavlm_large \
-  --checkpoint weight/wavlm_large_finetune.pth \
+  --checkpoint ./seed-tts-eval/weight/wavlm_large_finetune.pth \
   --scores finetuning/exp/base_seed_tts_eval/sim.raw.txt \
   --wav1_start_sr 0 \
   --wav2_start_sr 0 \
@@ -580,7 +620,7 @@ python seed-tts-eval/thirdparty/UniSpeech/downstreams/speaker_verification/avera
 
 ```bash
 seed-tts-eval/weight/huggingface/
-weight/wavlm_large_finetune.pth
+seed-tts-eval/weight/wavlm_large_finetune.pth
 ```
 
 只要 upstream `wavlm_large.pt` 已在上述 Hugging Face cache 中，SIM 初始化就会优先命中本地缓存；如果缓存缺失且网络不可用，脚本会在模型初始化阶段直接报错退出，而不是在每个样本上重复卡住。
@@ -622,7 +662,7 @@ weight/wavlm_large_finetune.pth
 - WER 工具链：`seed-tts-eval/get_wav_res_ref_text.py` -> `seed-tts-eval/run_wer.py zh` -> `seed-tts-eval/average_wer.py`。
 - 中文 ASR 实际使用的是 FunASR 的 `paraformer-zh` 别名，对应 ModelScope 模型 `iic/speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch`。
 - SIM 工具链：`seed-tts-eval/thirdparty/UniSpeech/downstreams/speaker_verification/verification_pair_list_v2.py` -> `average.py`。
-- SIM 依赖的 speaker verification 权重是 `wavlm_large` upstream 与 `weight/wavlm_large_finetune.pth`。
+- SIM 依赖的 speaker verification 权重是 `wavlm_large` upstream 与 `seed-tts-eval/weight/wavlm_large_finetune.pth`。
 - 外部 benchmark 使用 `assets/BZNSYP_24k/codec/test_with_codes.jsonl`，样本数固定为 `100`。
 - 这里的可比性是“同数据、同下游指标、同离线评测链路”的任务级可比，而不是完全同结构同推理范式的严格 apples-to-apples：
   - Base 评测走的是 `generate_voice_clone(..., ref_audio=..., x_vector_only_mode=True)`

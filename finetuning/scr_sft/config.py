@@ -28,9 +28,11 @@ class TrainConfig:
     training_recipe: str
     stage1_epochs: int
     stage2_epochs: int
+    stage3_epochs: int
     main_kd_weight: float
     sub_kd_weight: float
     kd_temperature: float
+    speaker_init_num_samples: int
     audio_qc_report_only: bool
     dry_run: bool
 
@@ -48,6 +50,13 @@ class EvalConfig:
     fixed_eval_duration_ratio_warn: float
     enable_free_run_eval: bool
     free_run_eval_max_new_tokens: int
+    benchmark_eval_jsonl: str | None
+    benchmark_eval_num_samples: int
+    benchmark_eval_every_epochs: int
+    seed_tts_eval_root: str
+    seed_tts_eval_python: str
+    benchmark_eval_device: str
+    sim_finetune_checkpoint: str
     peak_warn_threshold: float
     clipped_frac_warn_threshold: float
     hf_noise_warn_threshold: float
@@ -85,16 +94,19 @@ class RunPaths:
     anomaly_dir: Path
     fixed_eval_audio_dir: Path
     free_run_eval_audio_dir: Path
+    benchmark_eval_dir: Path
     qc_report_dir: Path
     training_state_dir: Path
     step_csv: Path
     epoch_csv: Path
+    benchmark_epoch_csv: Path
 
     @classmethod
     def from_output_root(cls, output_root: str | Path) -> "RunPaths":
         output_dir = ensure_dir(output_root)
         logs_dir = ensure_dir(output_dir / "logs")
         metrics_dir = ensure_dir(logs_dir / "metrics")
+        benchmark_eval_dir = ensure_dir(logs_dir / "benchmark_eval")
         return cls(
             output_dir=output_dir,
             logs_dir=logs_dir,
@@ -104,10 +116,12 @@ class RunPaths:
             anomaly_dir=ensure_dir(logs_dir / "anomaly_batches"),
             fixed_eval_audio_dir=ensure_dir(logs_dir / "fixed_eval_audio"),
             free_run_eval_audio_dir=ensure_dir(logs_dir / "free_run_eval_audio"),
+            benchmark_eval_dir=benchmark_eval_dir,
             qc_report_dir=ensure_dir(logs_dir / "audio_qc"),
             training_state_dir=ensure_dir(output_dir / "training_state"),
             step_csv=metrics_dir / "train_step_metrics.csv",
             epoch_csv=metrics_dir / "train_epoch_metrics.csv",
+            benchmark_epoch_csv=metrics_dir / "benchmark_epoch_metrics.csv",
         )
 
 
@@ -118,4 +132,3 @@ class SFTConfig:
     logging: LoggingConfig
     checkpoint: CheckpointConfig
     paths: RunPaths
-

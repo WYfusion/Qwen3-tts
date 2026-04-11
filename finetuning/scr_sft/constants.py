@@ -33,9 +33,11 @@ EPOCH_PLOT_KEYS = [
     ("epoch_main_kd_loss", "epoch_main_kd_loss.png"),
     ("epoch_sub_kd_loss", "epoch_sub_kd_loss.png"),
     ("epoch_tokens_per_sec", "epoch_tokens_per_sec.png"),
+    ("benchmark_wer", "benchmark_wer.png"),
+    ("benchmark_asv", "benchmark_asv.png"),
+    ("benchmark_objective", "benchmark_objective.png"),
     ("fixed_eval_max_duration_ratio", "fixed_eval_max_duration_ratio.png"),
     ("fixed_eval_qc_score", "fixed_eval_qc_score.png"),
     ("free_run_eval_max_duration_ratio", "free_run_eval_max_duration_ratio.png"),
     ("free_run_eval_qc_score", "free_run_eval_qc_score.png"),
 ]
-
